@@ -1,0 +1,125 @@
+package array
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Append appends multiple arrays together
+func Append[T any](in ...[]T) []T {
+	var totalLength int
+	for i := range in {
+		totalLength += len(in[i])
+	}
+	array := make([]T, totalLength)
+	var index int
+	for i := range in {
+		for ii := range in[i] {
+			array[index] = in[i][ii]
+			index++
+		}
+	}
+	return array
+}
+
+// Combine two arrays of comparable types into one, removing duplicates.
+// The output order is not guaranteed.
+func Combine[T comparable](a, b []T) []T {
+	combinedMap := make(map[T]struct{})
+	for i := range a {
+		combinedMap[a[i]] = struct{}{}
+	}
+	for i := range b {
+		combinedMap[b[i]] = struct{}{}
+	}
+	combined := make([]T, len(combinedMap))
+	var index int
+	for e := range combinedMap {
+		combined[index] = e
+		index++
+	}
+	return combined
+}
+
+// ByteSV converts an array of fmt.Stringer to a string with separators
+func ByteSV[T fmt.Stringer](array []T, separator byte) string {
+	switch len(array) {
+	case 0:
+		return ""
+	case 1:
+		return array[0].String()
+	}
+	builder := strings.Builder{}
+	for i := range array {
+		builder.WriteByte(separator)
+		builder.WriteString(array[i].String())
+	}
+	return builder.String()[1:]
+}
+
+// StringSV converts an array of fmt.Stringer to a string with separators
+func StringSV[T fmt.Stringer](array []T, separator string) string {
+	switch len(array) {
+	case 0:
+		return ""
+	case 1:
+		return array[0].String()
+	}
+	builder := strings.Builder{}
+	for i := range array {
+		builder.WriteString(separator)
+		builder.WriteString(array[i].String())
+	}
+	return builder.String()[len(separator):]
+}
+
+func Empty[T any]() []T { return []T{} }
+
+func Map[T comparable](array []T) map[T]struct{} {
+	result := make(map[T]struct{}, len(array))
+	for i := range array {
+		result[array[i]] = struct{}{}
+	}
+	return result
+}
+
+func Nil[T any]() []T { return nil }
+
+// Remove removes all occurrences of the specified item from the array.
+func Remove[T comparable](array []T, remove T) []T {
+	var length int
+	for i := range array {
+		if array[i] != remove {
+			length++
+		}
+	}
+	var index int
+	newArray := make([]T, length)
+	for i := range array {
+		if array[i] != remove {
+			newArray[index] = array[i]
+			index++
+		}
+	}
+	return newArray
+}
+
+// Subtract removes the items in array b from array a.
+// Duplicate items are reduced to a single instance.
+// The order of the remaining items is not guaranteed.
+func Subtract[T comparable](a []T, b []T) []T {
+	removeMap := make(map[T]struct{})
+	for i := range a {
+		removeMap[a[i]] = struct{}{}
+	}
+	for i := range b {
+		delete(removeMap, b[i])
+	}
+	result := make([]T, len(removeMap))
+	var index int
+	for e := range removeMap {
+		result[index] = e
+		index++
+	}
+	return result
+}

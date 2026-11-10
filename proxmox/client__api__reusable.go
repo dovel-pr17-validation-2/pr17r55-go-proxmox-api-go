@@ -1,0 +1,342 @@
+package proxmox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+// Reusable low-level API methods
+
+const RequestRetryCount = 3
+
+const (
+	taskBackoff             = time.Millisecond * 100 // cluster is overwhelmed
+	errorPrefixNoWorkerUpID = "got no worker upid "  // got no worker upid - start worker failed
+)
+
+func (c *clientAPI) getResourceList(ctx context.Context, resourceType string) ([]any, error) {
+	var url strings.Builder
+	url.WriteString("/cluster/resources")
+	if resourceType != "" {
+		url.WriteString("?type=")
+		url.WriteString(resourceType)
+	}
+	return c.getList(ctx, url.String(), "", "")
+}
+
+// Primitive methods
+
+// Makes a DELETE request without waiting on proxmox for the task to complete.
+// It returns the HTTP error as 'err'.
+func (c *clientAPI) delete(ctx context.Context, url string) (err error) {
+	var retry bool
+	for i := range time.Duration(RequestRetryCount) {
+		_, retry, err = c.session.delete(ctx, url, nil, nil)
+		if err == nil {
+			return nil
+		}
+		if !retry {
+			return
+		}
+		time.Sleep((i + 1) * c.timeUnit)
+	}
+	return
+}
+
+// Makes a DELETE request and waits on proxmox for the task to complete.
+// It returns the HTTP error as 'err'.
+func (c *clientAPI) deleteTask(ctx context.Context, url string) error {
+	for {
+		err := c.deleteTaskNoHighLevelRetry(ctx, url)
+		if err != nil {
+			if apiErr, ok := err.(*ApiError); ok {
+				if strings.HasPrefix(apiErr.Message, errorPrefixNoWorkerUpID) {
+					time.Sleep(taskBackoff)
+					continue
+				}
+			}
+		}
+		return err
+	}
+}
+
+func (c *clientAPI) deleteTaskNoHighLevelRetry(ctx context.Context, url string) error {
+	var response *http.Response
+	var retry bool
+	var err error
+	for i := range time.Duration(RequestRetryCount) {
+		response, retry, err = c.session.delete(ctx, url, nil, nil)
+		if err == nil || !retry {
+			break
+		}
+		time.Sleep((i + 1) * c.timeUnit)
+	}
+	if err != nil {
+		return err
+	}
+	return c.checkTask(ctx, response)
+}
+
+// Same as (c *Client) GetItemConfigMapStringInterface()
+func (c *clientAPI) getMap(ctx context.Context, url, text, message string) (map[string]any, error) {
+	var data map[string]any
+	if err := c.getJsonRetry(ctx, url, &data, RequestRetryCount); err != nil {
+		return nil, err
+	}
+	if v, ok := data["data"]; ok {
+		return v.(map[string]any), nil
+	}
+	return nil, errors.New(text + " " + message + " not readable")
+}
+
+func (c *clientAPI) getList(ctx context.Context, url, text, message string) ([]any, error) {
+	var data map[string]any
+	if err := c.getJsonRetry(ctx, url, &data, RequestRetryCount); err != nil {
+		return nil, err
+	}
+	if v, ok := data["data"]; ok {
+		if vv, ok := v.([]any); ok {
+			return vv, nil
+		}
+		return nil, fmt.Errorf("failed to cast response to list, resp: %v", v)
+	}
+	return nil, errors.New(text + " " + message + " not readable")
+}
+
+// Makes a POST request without waiting on proxmox for the task to complete.
+// It returns the HTTP error as 'err'.
+func (c *clientAPI) post(ctx context.Context, url string, body *[]byte) (err error) {
+	var retry bool
+	for i := range time.Duration(RequestRetryCount) {
+		_, retry, err = c.session.post(ctx, url, nil, nil, body)
+		if err == nil {
+			return
+		}
+		if !retry {
+			return
+		}
+		time.Sleep((i + 1) * c.timeUnit)
+	}
+	return
+}
+
+func (c *clientAPI) postMap(ctx context.Context, url string, body *[]byte, text, message string) (map[string]any, error) {
+	data, err := c.postJsonRetry(ctx, url, body, RequestRetryCount)
+	if err != nil {
+		return nil, err
+	}
+	if v, ok := data["data"]; ok {
+		return v.(map[string]any), nil
+	}
+	return nil, errors.New(text + " " + message + " not readable")
+}
+
+func (c *clientAPI) postJsonRetry(ctx context.Context, url string, body *[]byte, tries int) (response map[string]any, err error) {
+	var retry bool
+	for i := range time.Duration(tries) {
+		_, retry, err = c.session.postJSON(ctx, url, nil, nil, body, &response)
+		if err == nil {
+			return
+		}
+		if !retry {
+			return
+		}
+		time.Sleep((i + 1) * c.timeUnit)
+	}
+	return
+}
+
+func (c *clientAPI) postTask(ctx context.Context, url string, body *[]byte) error {
+	for {
+		err := c.postTaskNoHighLevelRetry(ctx, url, body)
+		if err != nil {
+			if apiErr, ok := err.(*ApiError); ok {
+				if strings.HasPrefix(apiErr.Message, errorPrefixNoWorkerUpID) {
+					time.Sleep(taskBackoff)
+					continue
+				}
+			}
+		}
+		return err
+	}
+}
+
+func (c *clientAPI) postTaskNoHighLevelRetry(ctx context.Context, url string, body *[]byte) error {
+	var response *http.Response
+	var retry bool
+	var err error
+	for i := range time.Duration(RequestRetryCount) {
+		response, retry, err = c.session.post(ctx, url, nil, nil, body)
+		if err == nil || !retry {
+			break
+		}
+		time.Sleep((i + 1) * c.timeUnit)
+	}
+	if err != nil {
+		return err
+	}
+	return c.checkTask(ctx, response)
+}
+
+// Makes a PUT request without waiting on proxmox for the task to complete.
+// It returns the HTTP error as 'err'.
+func (c *clientAPI) put(ctx context.Context, url string, params map[string]any) (retry bool, err error) {
+	reqbody := paramsToBodyWithAllEmpty(params)
+	_, retry, err = c.session.put(ctx, url, nil, nil, &reqbody)
+	return
+}
+
+func (c *clientAPI) putRawRetry(ctx context.Context, url string, body *[]byte, tries int) (err error) {
+	var retry bool
+	for i := range time.Duration(tries) {
+		_, retry, err = c.session.put(ctx, url, nil, nil, body)
+		if err == nil {
+			return
+		}
+		if !retry {
+			return
+		}
+		time.Sleep((i + 1) * c.timeUnit)
+	}
+	return
+}
+
+func (c *clientAPI) putTask(ctx context.Context, url string, body *[]byte) error {
+	for {
+		err := c.putTaskNoHighLevelRetry(ctx, url, body)
+		if err != nil {
+			if apiErr, ok := err.(*ApiError); ok {
+				if strings.HasPrefix(apiErr.Message, errorPrefixNoWorkerUpID) {
+					time.Sleep(taskBackoff)
+					continue
+				}
+			}
+		}
+		return err
+	}
+}
+
+func (c *clientAPI) putTaskNoHighLevelRetry(ctx context.Context, url string, body *[]byte) error {
+	var response *http.Response
+	var retry bool
+	var err error
+	for i := range time.Duration(RequestRetryCount) {
+		response, retry, err = c.session.put(ctx, url, nil, nil, body)
+		if err == nil || !retry {
+			break
+		}
+		time.Sleep((i + 1) * c.timeUnit)
+	}
+	if err != nil {
+		return err
+	}
+	return c.checkTask(ctx, response)
+}
+
+// checkTask polls the API to check if the Proxmox task has been completed.
+// It returns the body of the HTTP response and any HTTP error occurred during the request.
+func (c *clientAPI) checkTask(ctx context.Context, resp *http.Response) error {
+	taskResponse, err := responseJSON(resp)
+	if err != nil {
+		return err
+	}
+	if v, ok := taskResponse["errors"]; ok {
+		errMsg, _ := json.MarshalIndent(v, "", "  ")
+		return errors.New(string(errMsg))
+	}
+	upID, ok := taskResponse["data"]
+	if !ok { // when we try to get a response for a task that doesn't produce a task.
+		if c.featureFlags.PanicOnInvalidTask {
+			panic("We got a response from the API that doesn't contain a task ID. This is unexpected and should be investigated.")
+		}
+		return nil
+	}
+	if c.featureFlags.AsyncTask {
+		return newTask(ctx, c, upID.(string), TaskStatusCheckInterval*time.Second).WaitForCompletion()
+	}
+	return c.waitForCompletion(ctx, upID.(string))
+}
+
+// waitForCompletion - poll the API for task completion
+func (c *clientAPI) waitForCompletion(ctx context.Context, upID string) error {
+	endTime := time.Now().Add(c.taskTimeout)
+	for !time.Now().After(endTime) {
+		retry, err := c.getTaskExitStatus(ctx, upID)
+		if err != nil {
+			return err
+		}
+		if !retry {
+			return nil
+		}
+		time.Sleep(c.timeUnit)
+	}
+	return errors.New("Wait timeout for:" + upID)
+}
+
+func (c *clientAPI) getTaskExitStatus(ctx context.Context, taskUpID string) (bool, error) {
+
+	// "UPID:pve-01:00068180:17BE8318:697285F2:qmdelsnapshot:801:root@pam:"
+	const prefixLen = len("UPID:")
+	secondColon := strings.IndexByte(taskUpID[prefixLen:], ':') // find position of second colon
+	node := taskUpID[prefixLen : prefixLen+secondColon]
+
+	var err error
+	var data map[string]any
+	dataPtr := &data
+	url := "/nodes/" + node + "/tasks/" + taskUpID + "/status"
+	for i := range time.Duration(RequestRetryCount) {
+		var retry bool
+		_, retry, err = c.session.getJSON(ctx, url, nil, nil, dataPtr)
+		if err == nil || !retry {
+			break
+		}
+		if err == io.ErrUnexpectedEOF { // Early EOF can happen, don't retry
+			return true, nil
+		}
+		time.Sleep((i + 1) * c.timeUnit)
+	}
+	if err != nil {
+		return false, err
+	}
+	var exitStatus string
+	if v, isSet := data["data"].(map[string]any)["exitstatus"]; isSet {
+		exitStatus = v.(string)
+	} else {
+		return true, nil // still running
+	}
+
+	const taskSuccess = "OK"
+	const taskWarning = "WARNING"
+
+	if exitStatus == taskSuccess {
+		return false, nil
+	}
+	if strings.HasPrefix(exitStatus, taskWarning) {
+		return false, nil
+	}
+	return false, &TaskError{
+		Message: exitStatus,
+		TaskID:  taskUpID}
+}
+
+func (c *clientAPI) getJsonRetry(ctx context.Context, url string, data *map[string]any, tries int) error {
+	var err error
+	var retry bool
+	for i := range time.Duration(tries) {
+		_, retry, err = c.session.getJSON(ctx, url, nil, nil, data)
+		if err == nil {
+			return nil
+		}
+		if !retry {
+			return err
+		}
+		time.Sleep((i + 1) * c.timeUnit)
+	}
+	return err
+}

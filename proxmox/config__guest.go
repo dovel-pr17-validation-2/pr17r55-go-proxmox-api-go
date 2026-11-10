@@ -1,0 +1,545 @@
+package proxmox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/netip"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Telmate/proxmox-api-go/internal/util"
+)
+
+// All code LXC and Qemu have in common should be placed here.
+
+type (
+	GuestInterface interface {
+		// Returns true if the guest existed and was deleted, false if the guest did not exist.
+		Delete(context.Context, VmRef) (bool, error)
+		DeleteNoCheck(context.Context, VmRef) (bool, error)
+
+		HasFeature(context.Context, VmRef, GuestFeature) (bool, error)
+		HasFeatureNoCheck(context.Context, VmRef, GuestFeature) (bool, error)
+
+		// List all guest and templates the user has viewing rights for in the cluster.
+		List(context.Context) (RawGuestResources, error)
+		ListNoCheck(context.Context) (RawGuestResources, error)
+
+		ListFeatures(context.Context, VmRef) (GuestFeatures, error)
+		ListFeaturesNoCheck(context.Context, VmRef) (GuestFeatures, error)
+
+		PendingChanges(context.Context, VmRef) (bool, error)
+		PendingChangesNoCheck(context.Context, VmRef) (bool, error)
+
+		Reboot(context.Context, VmRef) error
+		RebootNoCheck(context.Context, VmRef) error
+
+		Shutdown(context.Context, VmRef) error
+		ShutdownNoCheck(context.Context, VmRef) error
+
+		ShutdownForce(context.Context, VmRef) error
+		ShutdownForceNoCheck(context.Context, VmRef) error
+
+		Start(context.Context, VmRef) error
+		StartNoCheck(context.Context, VmRef) error
+
+		Status(context.Context, VmRef) (RawGuestStatus, error)
+		StatusNoCheck(context.Context, VmRef) (RawGuestStatus, error)
+
+		// Stop will stop the guest.
+		// The overrule flag will opportunistically set the overrule-shutdown parameter if the Proxmox VE version is 8.0 or higher.
+		// If the version is lower, overrule will be ignored and the normal stop command will be executed, as overrule is not supported on versions lower than 8.0.
+		Stop(ctx context.Context, vmr VmRef, overrule bool) error
+		StopNoCheck(context.Context, VmRef) error
+
+		// StopOverrule is not supported on Proxmox VE versions lower than 8.0.
+		// On unsupported versions, this method will return an error.
+		// On supported versions, this method will stop the guest and overrule any shutdown hooks or timeouts.
+		StopOverrule(context.Context, VmRef) error
+		StopOverruleNoCheck(context.Context, VmRef) error
+	}
+
+	guestClient struct {
+		api       *clientAPI
+		oldClient *Client
+	}
+)
+
+var _ GuestInterface = (*guestClient)(nil)
+
+func (c *guestClient) PendingChanges(ctx context.Context, vmr VmRef) (bool, error) {
+	ref := vmr.toGuestRef()
+	_, err := ref.check(ctx, nil, c.api)
+	if err != nil {
+		return false, err
+	}
+	return c.PendingChangesNoCheck(ctx, ref.legacy())
+}
+
+func (c *guestClient) PendingChangesNoCheck(ctx context.Context, vmr VmRef) (bool, error) {
+	return vmr.toGuestRef().pendingChanges(ctx, c.api)
+}
+
+type GuestDNS struct {
+	NameServers  *[]netip.Addr `json:"nameservers,omitempty"`
+	SearchDomain *string       `json:"searchdomain,omitempty"` // we are not validating this field, as validating domain names is a complex topic.
+}
+
+func (config GuestDNS) mapToApiCreate(params map[string]any) {
+	if config.NameServers != nil && len(*config.NameServers) > 0 {
+		var nameservers strings.Builder
+		for _, ns := range *config.NameServers {
+			nameservers.WriteByte(' ')
+			nameservers.WriteString(ns.String())
+		}
+		params[guestApiKeyNameServer] = nameservers.String()[1:]
+	}
+	if config.SearchDomain != nil && *config.SearchDomain != "" {
+		params[guestApiKeySearchDomain] = *config.SearchDomain
+	}
+}
+
+func (config GuestDNS) mapToApiUpdate(current GuestDNS, params map[string]any) (delete string) {
+	if config.SearchDomain != nil {
+		if *config.SearchDomain != "" {
+			if current.SearchDomain == nil || *config.SearchDomain != *current.SearchDomain {
+				params[guestApiKeySearchDomain] = *config.SearchDomain
+			}
+		} else if current.SearchDomain != nil {
+			delete += "," + guestApiKeySearchDomain
+		}
+	}
+	if config.NameServers != nil {
+		if len(*config.NameServers) > 0 {
+			var nameServers string
+			for i := range *config.NameServers {
+				nameServers += " " + (*config.NameServers)[i].String()
+			}
+			if current.NameServers != nil && len(*current.NameServers) > 0 {
+				var currentNameServers string
+				for i := range *current.NameServers {
+					currentNameServers += " " + (*current.NameServers)[i].String()
+				}
+				if nameServers == currentNameServers {
+					return
+				}
+			}
+			params[guestApiKeyNameServer] = nameServers[1:]
+		} else if current.NameServers != nil {
+			delete += "," + guestApiKeyNameServer
+		}
+	}
+	return
+}
+
+func (GuestDNS) mapToSDK(params map[string]any) *GuestDNS {
+	var dnsSet bool
+	var nameservers []netip.Addr
+	if v, isSet := params[guestApiKeyNameServer]; isSet {
+		tmp := strings.Split(v.(string), " ")
+		nameservers = make([]netip.Addr, len(tmp))
+		for i, e := range tmp {
+			nameservers[i], _ = netip.ParseAddr(e)
+		}
+		dnsSet = true
+	}
+	var domain string
+	if v, isSet := params[guestApiKeySearchDomain]; isSet {
+		if len(v.(string)) > 1 {
+			domain = v.(string)
+			dnsSet = true
+		}
+	}
+	if !dnsSet {
+		return nil
+	}
+	return &GuestDNS{
+		SearchDomain: &domain,
+		NameServers:  &nameservers}
+}
+
+const (
+	guestApiKeyNameServer   string = "nameserver"
+	guestApiKeySearchDomain string = "searchdomain"
+)
+
+// GuestName has a maximum length of 128 characters.
+// Has the same syntax as a DNS name.
+// Domain sections may not start or end with a hyphen (-) or dot (.).
+// Valid characters are letters, numbers, hyphens (-) and dots (.).
+// Regex: ^(?=.{1,127}$)(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)\.)*(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)$
+type GuestName string
+
+const (
+	guestNameMaxLength    = 128
+	GuestNameErrorEmpty   = `name cannot be empty`
+	GuestNameErrorInvalid = `name did not match the following regex '^(?=.{1,127}$)(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)\.)*(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)$'`
+	GuestNameErrorLength  = `name has a maximum length of 128`
+	GuestNameErrorStart   = `name cannot start with a hyphen (-) or dot (.)`
+	GuestNameErrorEnd     = `name cannot end with a hyphen (-) or dot (.)`
+)
+
+var guestNameRegex = regexp.MustCompile(`^(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)\.)*(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)$`)
+
+func (name GuestName) String() string { return string(name) } // String is for fmt.Stringer.
+
+func (name GuestName) Validate() error {
+	if len(name) == 0 {
+		return errors.New(GuestNameErrorEmpty)
+	}
+	if len(name) > guestNameMaxLength {
+		return errors.New(GuestNameErrorLength)
+	}
+	switch name[0] {
+	case '-', '.':
+		return errors.New(GuestNameErrorStart)
+	}
+	switch name[len(name)-1] {
+	case '-', '.':
+		return errors.New(GuestNameErrorEnd)
+	}
+	if !guestNameRegex.MatchString(string(name)) {
+		return errors.New(GuestNameErrorInvalid)
+	}
+	return nil
+}
+
+// 0 to 10240000, where 0 means no limit
+type GuestNetworkRate uint32
+
+const (
+	GuestNetworkRate_Error_Invalid = "network rate must be in the range 0 to 10240000"
+	GuestNetworkRateMaximum        = 10240000
+	GuestNetworkRateUnlimited      = GuestNetworkRate(0)
+)
+
+// unsafe requires caller to check for nil
+func (rate GuestNetworkRate) mapToAPI(b *strings.Builder) {
+	if rate == GuestNetworkRateUnlimited {
+		return
+	}
+	b.WriteString(comma + "rate" + equal)
+	rawRate := strconv.Itoa(int(rate))
+	length := len(rawRate)
+	if length > 3 {
+		// Insert a decimal point three places from the end
+		if rate%1000 == 0 {
+			b.WriteString(rawRate[:length-3])
+			return
+		} else {
+			b.WriteString(rawRate[:length-3])
+			b.WriteByte('.')
+			b.WriteString(strings.TrimRight(rawRate[length-3:], "0"))
+			return
+		}
+	}
+	// Prepend zeros to ensure decimal places
+	prefixRate := "000" + rawRate
+	b.WriteString("0.")
+	b.WriteString(strings.TrimRight(prefixRate[length:], "0"))
+}
+
+func (GuestNetworkRate) mapToSDK(rawRate string) *GuestNetworkRate {
+	splitRate := strings.Split(rawRate, ".")
+	var rate int
+	switch len(splitRate) {
+	case 1:
+		if splitRate[0] != "0" {
+			rate, _ = strconv.Atoi(splitRate[0] + "000")
+		}
+	case 2:
+		// Pad the fractional part to ensure it has at least 3 digits
+		fractional := splitRate[1] + "000"
+		rate, _ = strconv.Atoi(splitRate[0] + fractional[:3])
+	}
+	return util.Pointer(GuestNetworkRate(rate))
+}
+
+func (rate GuestNetworkRate) Validate() error {
+	if rate > GuestNetworkRateMaximum {
+		return errors.New(GuestNetworkRate_Error_Invalid)
+	}
+	return nil
+}
+
+// Positive number between 100 and 1000000000
+type GuestID uint32
+
+const (
+	GuestID_Error_Maximum = "guestID should be less than 1000000000"
+	GuestID_Error_Minimum = "guestID should be greater than 99"
+	GuestIdMaximum        = 999999999
+	GuestIdMinimum        = 100
+)
+
+func (guestID GuestID) setPool(ctx context.Context, c *clientAPI, newPool PoolName, currentPool *PoolName, version Version) (err error) {
+	if newPool == "" {
+		if currentPool != nil && *currentPool != "" { // leave pool
+			if err = (*currentPool).removeMembers(ctx, c, &[]GuestID{guestID}, nil); err != nil {
+				return
+			}
+		}
+	} else {
+		if currentPool == nil || *currentPool == "" { // join pool
+			if version.Major < 8 {
+				if err = newPool.addGuestsV7(ctx, c, &[]GuestID{guestID}, nil); err != nil {
+					return
+				}
+			} else {
+				newPool.addGuestsV8(ctx, c, &[]GuestID{guestID}, nil)
+			}
+		} else if newPool != *currentPool { // change pool
+			if version.Major < 8 {
+				if err = (*currentPool).removeMembers(ctx, c, &[]GuestID{guestID}, nil); err != nil {
+					return
+				}
+				if err = newPool.addGuestsV7(ctx, c, &[]GuestID{guestID}, nil); err != nil {
+					return
+				}
+			} else {
+				if err = newPool.addGuestsV8(ctx, c, &[]GuestID{guestID}, nil); err != nil {
+					return
+				}
+			}
+		}
+	}
+	return
+}
+
+// DeleteHaResource deletes an HA resource. Returns false if the resource does not exist and was not deleted, true if successfully deleted.
+func (id GuestID) DeleteHaResource(ctx context.Context, c *Client) (bool, error) {
+	err := id.Validate()
+	if err != nil {
+		return false, err
+	}
+	return c.new().haDeleteResource(ctx, id)
+}
+
+func (c *clientNewTest) haDeleteResource(ctx context.Context, id GuestID) (bool, error) {
+	return id.deleteHaResource(ctx, c.apiRaw())
+}
+
+func (id GuestID) deleteHaResource(ctx context.Context, c *clientAPI) (bool, error) {
+	if err := c.deleteHaResource(ctx, id); err != nil {
+		if apiErr, ok := err.(*ApiError); ok {
+			if strings.HasPrefix(apiErr.Message, "cannot delete service") {
+				return false, nil
+			}
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (id GuestID) errorContext() string {
+	return "ID " + id.String()
+}
+
+func (id GuestID) Exists(ctx context.Context, c *Client) (bool, error) {
+	if err := c.checkInitialized(); err != nil {
+		return false, err
+	}
+	if err := id.Validate(); err != nil {
+		return false, err
+	}
+	return id.exists_Unsafe(ctx, c)
+}
+
+func (id GuestID) ExistsNoCheck(ctx context.Context, c *Client) (bool, error) {
+	if err := c.checkInitialized(); err != nil {
+		return false, err
+	}
+	return id.exists_Unsafe(ctx, c)
+}
+
+func (id GuestID) exists_Unsafe(ctx context.Context, c *Client) (bool, error) {
+	guests, err := c.GetResourceList(ctx, resourceListGuest)
+	if err != nil {
+		return false, err
+	}
+	for i := range guests {
+		guest := guests[i].(map[string]any)
+		if id == GuestID(guest["vmid"].(float64)) {
+			return true, nil
+		}
+	}
+	return false, nil
+	// FIXME: The code below would be more efficient, but for some users we parse the error body and for others the header. This inconsistency needs to be resolved first.
+	// _, err := c.GetItemConfigString(ctx, url_NextID+"?vmid="+id.String(), "API", "cluster/nextid",
+	// 	func(err error) bool {
+	// 		return err.Error() == guestIDexistsError
+	// 	})
+	// if err != nil {
+	// 	if err.Error() == guestIDexistsError {
+	// 		return true, nil
+	// 	}
+	// }
+	// return false, err
+}
+
+func (id GuestID) String() string { return strconv.Itoa(int(id)) } // String is for fmt.Stringer.
+
+func (id GuestID) Validate() error {
+	if id < GuestIdMinimum {
+		return errors.New(GuestID_Error_Minimum)
+	}
+	if id > GuestIdMaximum {
+		return errors.New(GuestID_Error_Maximum)
+	}
+	return nil
+}
+
+// GuestType is an enum for the type of guest (lxc or qemu)
+//
+//	const (
+//		GuestLxc
+//		GuestQemu
+//	)
+type GuestType uint8
+
+const (
+	guestUnknown GuestType = 0
+	GuestLxc     GuestType = 1
+	GuestQemu    GuestType = 2
+)
+
+const GuestType_Error_Invalid = "guest type should be one of (lxc, qemu)"
+
+func (t GuestType) MarshalJSON() ([]byte, error) { return json.Marshal(t.String()) }
+
+func (t *GuestType) Parse(guestType string) error {
+	switch guestType {
+	case "lxc":
+		*t = GuestLxc
+		return nil
+	case "qemu":
+		*t = GuestQemu
+		return nil
+	}
+	return errors.New(GuestType_Error_Invalid)
+}
+
+func (t *GuestType) parse(guestType string) {
+	switch guestType {
+	case "lxc":
+		*t = GuestLxc
+	case "qemu":
+		*t = GuestQemu
+	}
+}
+
+func (t GuestType) String() string {
+	switch t {
+	case GuestLxc:
+		return "lxc"
+	case GuestQemu:
+		return "qemu"
+	}
+	return "unknown"
+}
+
+// Deprecated: use GuestInterface.HasFeature() instead.
+// check if the guest has the specified feature.
+func GuestHasFeature(ctx context.Context, vmr *VmRef, client *Client, feature GuestFeature) (bool, error) {
+	return client.New().Guest.HasFeature(ctx, *vmr, feature)
+}
+
+// Check if there are any pending changes that require a reboot to be applied.
+// Same as VmRef.PendingChanges.
+func GuestHasPendingChanges(ctx context.Context, vmr *VmRef, client *Client) (bool, error) {
+	return vmr.PendingChanges(ctx, client)
+}
+
+// Reboot the specified guest
+// Deprecated: use GuestInterface.Reboot() instead.
+func GuestReboot(ctx context.Context, vmr *VmRef, client *Client) (err error) {
+	_, err = client.RebootVm(ctx, vmr)
+	return
+}
+
+// Deprecated: use GuestInterface.Shutdown() instead.
+func GuestShutdown(ctx context.Context, vmr *VmRef, client *Client, force bool) (err error) {
+	if err = client.CheckVmRef(ctx, vmr); err != nil {
+		return
+	}
+	var params map[string]interface{}
+	if force {
+		params = map[string]interface{}{"forceStop": force}
+	}
+	_, err = client.PostWithTask(ctx, params, "/nodes/"+vmr.node.String()+"/"+vmr.vmType.String()+"/"+vmr.vmId.String()+"/status/shutdown")
+	return
+}
+
+// Deprecated: use GuestInterface.Start() instead.
+func GuestStart(ctx context.Context, vmr *VmRef, client *Client) (err error) {
+	_, err = client.StartVm(ctx, vmr)
+	return
+}
+
+// Deprecated: use GuestInterface.ListFeatures() instead.
+// List all features the guest has.
+func ListGuestFeatures(ctx context.Context, vmr *VmRef, client *Client) (features GuestFeatures, err error) {
+	return client.New().Guest.ListFeatures(ctx, *vmr)
+}
+
+// Keep trying to create/clone a VM until we get a unique ID
+func guestCreateLoop_Unsafe(ctx context.Context, idKey, url string, params map[string]any, body *[]byte, c *Client, ca *clientAPI) (GuestID, error) {
+	c.guestCreationMutex.Lock()
+	defer c.guestCreationMutex.Unlock()
+	for {
+		guestID, err := c.getNextID_Unsafe(ctx)
+		if err != nil {
+			return 0, err
+		}
+		var sendBody *[]byte
+		if params != nil {
+			params[idKey] = guestID.String()
+			sendBody = combineParamsAndBody(params, body)
+		} else {
+			sendBody = new(append(*body, []byte("&"+idKey+"="+guestID.String())...))
+		}
+		if err = ca.postTaskNoHighLevelRetry(ctx, url, sendBody); err != nil {
+			// TODO test what happens during a LXC clone
+			//
+			// Create LXC
+			// "VM 106 already exists on node 'pve-9l'"
+			//
+			//
+			// Clone QEMU
+			// "unable to create VM 107: config file already exists"
+			//
+			// Create QEMU
+			// "unable to create VM 106 - VM 106 already exists on node 'pve-9l'"
+			// the task returns the same message
+			if apiErr, ok := err.(*ApiError); ok {
+				if strings.Contains(apiErr.Message, "already exists") {
+					continue
+				}
+				if strings.HasPrefix(apiErr.Message, errorPrefixNoWorkerUpID) {
+					time.Sleep(taskBackoff) // cluster is overwhelmed
+					continue
+				}
+				return 0, err
+			} else if taskErr, ok := err.(*TaskError); ok {
+				if strings.Contains(taskErr.Message, "already exists") {
+					continue
+				}
+				if strings.HasSuffix(taskErr.Message, "ile exists") { // close (rename) atomic file '/etc/pve/nodes/pve/qemu-server/100.conf' failed: File exists
+					continue
+				}
+				if strings.HasSuffix(taskErr.Message, "got timeout") { // can't lock file '/var/lock/qemu-server/lock-100.conf' - got timeout
+					time.Sleep(taskBackoff) // cluster is overwhelmed
+					continue
+				}
+				return 0, err
+			} else {
+				return 0, err
+			}
+		} else {
+			return guestID, nil
+		}
+	}
+}

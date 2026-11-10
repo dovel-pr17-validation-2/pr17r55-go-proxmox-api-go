@@ -1,0 +1,10 @@
+proxmox-api-go
+.vagrant/
+.vscode
+.idea/
+.env
+
+*coverage.html
+*coverage.out
+
+*.log

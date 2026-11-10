@@ -1,0 +1,118 @@
+package proxmox
+
+import (
+	"context"
+)
+
+type mockClientAPI struct {
+	createHaRuleFunc           func(ctx context.Context, params map[string]any) error
+	deleteGuestFunc            func(ctx context.Context, vmr *VmRef, purge bool) error
+	deleteHaResourceFunc       func(ctx context.Context, id GuestID) error
+	deleteHaRuleFunc           func(ctx context.Context, id HaRuleID) error
+	getGuestConfigFunc         func(context.Context, guestRef) (map[string]any, error)
+	getGuestPendingChangesFunc func(context.Context, guestRef) ([]any, error)
+	getHaRuleFunc              func(ctx context.Context, id HaRuleID) (map[string]any, error)
+	getPoolConfigFunc          func(ctx context.Context, pool PoolName) (map[string]any, error)
+	getUserConfigFunc          func(ctx context.Context, userId UserID) (map[string]any, bool, error)
+	listGuestResourcesFunc     func(ctx context.Context) (*rawGuestResources, error)
+	listHaRulesFunc            func(ctx context.Context) ([]any, error)
+	updateGuestStatusFunc      func(ctx context.Context, ref guestRef, setStatus string, body *[]byte) error
+	updateHaRuleFunc           func(ctx context.Context, id HaRuleID, params map[string]any) error
+}
+
+func (m mockClientAPI) new() clientApiInterface { return &m }
+
+func (m *mockClientAPI) panic(field string) { panic(field + " not set in mockClientAPI") }
+
+// Interface methods
+
+func (m *mockClientAPI) createHaRule(ctx context.Context, params map[string]any) error {
+	if m.createHaRuleFunc == nil {
+		m.panic("createHaRuleFunc")
+	}
+	return m.createHaRuleFunc(ctx, params)
+}
+
+func (m *mockClientAPI) deleteGuest(ctx context.Context, vmr *VmRef, purge bool) error {
+	if m.deleteGuestFunc == nil {
+		m.panic("deleteGuestFunc")
+	}
+	return m.deleteGuestFunc(ctx, vmr, purge)
+}
+
+func (m *mockClientAPI) deleteHaResource(ctx context.Context, id GuestID) error {
+	if m.deleteHaResourceFunc == nil {
+		m.panic("deleteHaResourceFunc")
+	}
+	return m.deleteHaResourceFunc(ctx, id)
+}
+
+func (m *mockClientAPI) deleteHaRule(ctx context.Context, id HaRuleID) error {
+	if m.deleteHaRuleFunc == nil {
+		m.panic("deleteHaRuleFunc")
+	}
+	return m.deleteHaRuleFunc(ctx, id)
+}
+
+func (m *mockClientAPI) getGuestConfig(ctx context.Context, ref guestRef) (vmConfig map[string]any, err error) {
+	if m.getGuestConfigFunc == nil {
+		m.panic("getGuestConfigFunc")
+	}
+	return m.getGuestConfigFunc(ctx, ref)
+}
+
+func (m *mockClientAPI) getGuestPendingChanges(ctx context.Context, ref guestRef) ([]any, error) {
+	if m.getGuestPendingChangesFunc == nil {
+		m.panic("getGuestPendingChangesFunc")
+	}
+	return m.getGuestPendingChangesFunc(ctx, ref)
+}
+
+func (m *mockClientAPI) getHaRule(ctx context.Context, id HaRuleID) (haRule map[string]any, err error) {
+	if m.getHaRuleFunc == nil {
+		m.panic("getHaRuleFunc")
+	}
+	return m.getHaRuleFunc(ctx, id)
+}
+
+func (m *mockClientAPI) getPoolConfig(ctx context.Context, pool PoolName) (poolConfig map[string]any, err error) {
+	if m.getPoolConfigFunc == nil {
+		m.panic("getPoolConfigFunc")
+	}
+	return m.getPoolConfigFunc(ctx, pool)
+}
+
+func (m *mockClientAPI) getUserConfig(ctx context.Context, userId UserID) (map[string]any, bool, error) {
+	if m.getUserConfigFunc == nil {
+		m.panic("getUserConfigFunc")
+	}
+	return m.getUserConfigFunc(ctx, userId)
+}
+
+func (m *mockClientAPI) listGuestResources(ctx context.Context) (*rawGuestResources, error) {
+	if m.listGuestResourcesFunc == nil {
+		m.panic("listGuestResourcesFunc")
+	}
+	return m.listGuestResourcesFunc(ctx)
+}
+
+func (m *mockClientAPI) listHaRules(ctx context.Context) ([]any, error) {
+	if m.listHaRulesFunc == nil {
+		m.panic("ListHaRulesFunc")
+	}
+	return m.listHaRulesFunc(ctx)
+}
+
+func (m *mockClientAPI) updateGuestStatus(ctx context.Context, ref guestRef, setStatus string, body *[]byte) error {
+	if m.updateGuestStatusFunc == nil {
+		m.panic("updateGuestStatusFunc")
+	}
+	return m.updateGuestStatusFunc(ctx, ref, setStatus, body)
+}
+
+func (m *mockClientAPI) updateHaRule(ctx context.Context, id HaRuleID, params map[string]any) error {
+	if m.updateHaRuleFunc == nil {
+		m.panic("updateHaRuleFunc")
+	}
+	return m.updateHaRuleFunc(ctx, id, params)
+}

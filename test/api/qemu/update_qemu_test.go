@@ -1,0 +1,382 @@
+package qemu
+
+import (
+	"context"
+	"strconv"
+	"testing"
+
+	"github.com/Telmate/proxmox-api-go/internal/pad"
+	"github.com/Telmate/proxmox-api-go/internal/util"
+	pveSDK "github.com/Telmate/proxmox-api-go/proxmox"
+	"github.com/Telmate/proxmox-api-go/test"
+	api_test "github.com/Telmate/proxmox-api-go/test/api"
+	"github.com/stretchr/testify/require"
+)
+
+func Test_Qemu_Update_Max_Transform(t *testing.T) {
+	t.Parallel()
+	const node = pveSDK.NodeName(test.FirstNode)
+	const guestName = "Test-Qemu-Update-Max"
+	const guestID = 1020
+	ctx := context.Background()
+	cl, err := api_test.NewClient()
+	require.NoError(t, err)
+	require.NoError(t, cl.Login(ctx, test.UserID, test.Password, ""))
+	c := cl.New()
+	var vmr *pveSDK.VmRef
+	tests := []struct {
+		name string
+		test func(t *testing.T)
+	}{
+		{name: `Ensure guest does not exist`,
+			test: func(t *testing.T) {
+				existed, err := c.Guest.Delete(ctx, *pveSDK.NewVmRef(pveSDK.GuestID(guestID)))
+				require.NoError(t, err)
+				require.False(t, existed)
+			}},
+		{name: `Create guest`,
+			test: func(t *testing.T) {
+				config := pveSDK.ConfigQemu{
+					ID:     util.Pointer(pveSDK.GuestID(guestID)),
+					CPU:    &pveSDK.QemuCPU{Cores: util.Pointer(pveSDK.QemuCpuCores(1))},
+					Memory: &pveSDK.QemuMemory{CapacityMiB: util.Pointer(pveSDK.QemuMemoryCapacity(16))},
+					Name:   util.Pointer(pveSDK.GuestName(guestName)),
+					Node:   util.Pointer(node),
+					EfiDisk: &pveSDK.EfiDisk{
+						Format:  util.Pointer(pveSDK.QemuDiskFormat("raw")),
+						Storage: util.Pointer(pveSDK.StorageName(test.GuestStorage)),
+					},
+				}
+				vmr, err = c.QemuGuest.Create(ctx, config)
+				require.NoError(t, err)
+				require.NotNil(t, vmr)
+			}},
+		{name: `Check guest config`,
+			test: func(t *testing.T) {
+				CheckConfig(t, ctx, c.QemuGuest, guestID, &pveSDK.ConfigQemu{
+					Bios: "seabios",
+					Boot: new(pveSDK.BootOrder),
+					CPU: &pveSDK.QemuCPU{
+						Cores:   new(pveSDK.QemuCpuCores(1)),
+						Numa:    new(false),
+						Sockets: new(pveSDK.QemuCpuSockets(1))},
+					Description: util.Pointer(""),
+					EfiDisk: &pveSDK.EfiDisk{
+						Size:            1024,
+						Format:          util.Pointer(pveSDK.QemuDiskFormat("raw")),
+						PreEnrolledKeys: util.Pointer(false),
+						Storage:         util.Pointer(pveSDK.StorageName(test.GuestStorage)),
+					},
+					HotPlug: &pveSDK.HotPlug{
+						CPU:     new(false),
+						Disk:    new(true),
+						Memory:  new(false),
+						Network: new(true),
+						USB:     new(true)},
+					ID:              util.Pointer(pveSDK.GuestID(guestID)),
+					Memory:          &pveSDK.QemuMemory{CapacityMiB: util.Pointer(pveSDK.QemuMemoryCapacity(16))},
+					Name:            util.Pointer(pveSDK.GuestName(guestName)),
+					Node:            util.Pointer(node),
+					Protection:      util.Pointer(false),
+					QemuKVM:         util.Pointer(true),
+					QemuOs:          "other",
+					QemuUnusedDisks: pveSDK.QemuDevices{},
+					QemuVga:         pveSDK.QemuDevice{},
+					Scsihw:          "lsi",
+					StartAtNodeBoot: util.Pointer(false),
+					Tablet:          util.Pointer(true),
+					Tags:            new(pveSDK.Tags),
+				})
+			}},
+		{name: `Update guest`,
+			test: func(t *testing.T) {
+				config := pveSDK.ConfigQemu{
+					ID:     util.Pointer(pveSDK.GuestID(guestID)),
+					CPU:    &pveSDK.QemuCPU{Cores: util.Pointer(pveSDK.QemuCpuCores(1))},
+					Memory: &pveSDK.QemuMemory{CapacityMiB: util.Pointer(pveSDK.QemuMemoryCapacity(16))},
+					Name:   util.Pointer(pveSDK.GuestName(guestName)),
+					Node:   util.Pointer(node),
+					EfiDisk: &pveSDK.EfiDisk{
+						PreEnrolledKeys: util.Pointer(true),
+						Format:          util.Pointer(pveSDK.QemuDiskFormat("raw")),
+						Storage:         util.Pointer(pveSDK.StorageName(test.GuestStorage)),
+					},
+				}
+				err = c.QemuGuest.Update(ctx, *vmr, true, false, config)
+				require.NoError(t, err)
+			}},
+		{name: `Check guest config after update`,
+			test: func(t *testing.T) {
+				CheckConfig(t, ctx, c.QemuGuest, guestID, &pveSDK.ConfigQemu{
+					Bios: "seabios",
+					Boot: new(pveSDK.BootOrder),
+					CPU: &pveSDK.QemuCPU{
+						Cores:   new(pveSDK.QemuCpuCores(1)),
+						Numa:    new(false),
+						Sockets: new(pveSDK.QemuCpuSockets(1))},
+					Description: util.Pointer(""),
+					EfiDisk: &pveSDK.EfiDisk{
+						Size:            1024,
+						Format:          util.Pointer(pveSDK.QemuDiskFormat("raw")),
+						PreEnrolledKeys: util.Pointer(true),
+						Storage:         util.Pointer(pveSDK.StorageName(test.GuestStorage)),
+					},
+					HotPlug: &pveSDK.HotPlug{
+						CPU:     new(false),
+						Disk:    new(true),
+						Memory:  new(false),
+						Network: new(true),
+						USB:     new(true)},
+					ID:              util.Pointer(pveSDK.GuestID(guestID)),
+					Memory:          &pveSDK.QemuMemory{CapacityMiB: util.Pointer(pveSDK.QemuMemoryCapacity(16))},
+					Name:            util.Pointer(pveSDK.GuestName(guestName)),
+					Node:            util.Pointer(node),
+					Protection:      util.Pointer(false),
+					QemuKVM:         util.Pointer(true),
+					QemuOs:          "other",
+					QemuUnusedDisks: pveSDK.QemuDevices{},
+					QemuVga:         pveSDK.QemuDevice{},
+					Scsihw:          "lsi",
+					StartAtNodeBoot: util.Pointer(false),
+					Tablet:          util.Pointer(true),
+					Tags:            new(pveSDK.Tags),
+				})
+			}},
+		{name: `Delete guest`,
+			test: func(t *testing.T) {
+				existed, err := c.Guest.Delete(ctx, *vmr)
+				require.NoError(t, err)
+				require.True(t, existed)
+			}},
+	}
+	for i, test := range tests {
+		t.Run(pad.Left(strconv.Itoa(i), 2, '0')+" "+test.name, test.test)
+	}
+}
+
+func Test_Qemu_Update_Reduced_To_Max(t *testing.T) {
+	t.Parallel()
+	const node = pveSDK.NodeName(test.FirstNode)
+	const guestName = "Test-Qemu-Update-Reduced-To-Max"
+	const guestID = 1021
+	ctx := context.Background()
+	cl, err := api_test.NewClient()
+	require.NoError(t, err)
+	require.NoError(t, cl.Login(ctx, test.UserID, test.Password, ""))
+	c := cl.New()
+	var vmr *pveSDK.VmRef
+	setReduced, expectedReduced := ReducedConfig(guestID, node, guestName)
+	setMax, expectedMax := MaximumConfig(guestID, node, guestName)
+	ClearDiskID(expectedMax)
+	tests := []struct {
+		name string
+		test func(t *testing.T)
+	}{
+		{name: `Ensure guest does not exist`,
+			test: func(t *testing.T) {
+				existed, err := c.Guest.Delete(ctx, *pveSDK.NewVmRef(pveSDK.GuestID(guestID)))
+				require.NoError(t, err)
+				require.False(t, existed)
+			}},
+		{name: `Create guest`,
+			test: func(t *testing.T) {
+				vmr, err = c.QemuGuest.Create(ctx, setReduced)
+				require.NoError(t, err)
+				require.NotNil(t, vmr)
+			}},
+		{name: `Check guest config`,
+			test: func(t *testing.T) {
+				CheckConfig(t, ctx, c.QemuGuest, guestID, expectedReduced)
+			}},
+		{name: `Update guest`,
+			test: func(t *testing.T) {
+				err = c.QemuGuest.Update(ctx, *vmr, true, false, setMax)
+				require.NoError(t, err)
+			}},
+		{name: `Check guest config after update`,
+			test: func(t *testing.T) {
+				config := GetConfig(t, ctx, c.QemuGuest, guestID)
+				ClearDiskID(config)
+				require.EqualExportedValues(t, expectedMax, config)
+			}},
+		{name: `Delete guest`,
+			test: func(t *testing.T) {
+				existed, err := c.Guest.Delete(ctx, *vmr)
+				require.NoError(t, err)
+				require.True(t, existed)
+			}},
+	}
+	for i, test := range tests {
+		t.Run(pad.Left(strconv.Itoa(i), 2, '0')+" "+test.name, test.test)
+	}
+}
+
+func Test_Qemu_Update_Max_To_Reduced(t *testing.T) {
+	t.Parallel()
+	const node = pveSDK.NodeName(test.FirstNode)
+	const guestName = "Test-Qemu-Update-Max-To-Reduced"
+	const guestID = 1022
+	ctx := context.Background()
+	cl, err := api_test.NewClient()
+	require.NoError(t, err)
+	require.NoError(t, cl.Login(ctx, test.UserID, test.Password, ""))
+	c := cl.New()
+	var vmr *pveSDK.VmRef
+	setMax, expectedMax := MaximumConfig(guestID, node, guestName)
+	expectedMax.Boot = &pveSDK.BootOrder{
+		pveSDK.QemuIdeID1.BootDevice(),
+		pveSDK.QemuIdeID0.BootDevice()}
+	expectedMax.Architecture = new(pveSDK.QemuCpuArchitectureAmd64)
+	setReduced, expectedReduced := ReducedConfig(guestID, node, guestName)
+	expectedReduced.Architecture = new(pveSDK.QemuCpuArchitectureAmd64)
+	tests := []struct {
+		name string
+		test func(t *testing.T)
+	}{
+		{name: `Ensure guest does not exist`,
+			test: func(t *testing.T) {
+				existed, err := c.Guest.Delete(ctx, *pveSDK.NewVmRef(pveSDK.GuestID(guestID)))
+				require.NoError(t, err)
+				require.False(t, existed)
+			}},
+		{name: `Create guest`,
+			test: func(t *testing.T) {
+				vmr, err = c.QemuGuest.Create(ctx, setMax)
+				require.NoError(t, err)
+				require.NotNil(t, vmr)
+			}},
+		{name: `Check guest config`,
+			test: func(t *testing.T) {
+				CheckConfig(t, ctx, c.QemuGuest, guestID, expectedMax)
+			}},
+		{name: `Update guest`,
+			test: func(t *testing.T) {
+				err = c.QemuGuest.Update(ctx, *vmr, true, false, setReduced)
+				require.NoError(t, err)
+			}},
+		{name: `Check guest config after update`,
+			test: func(t *testing.T) {
+				CheckConfig(t, ctx, c.QemuGuest, guestID, expectedReduced)
+			}},
+		{name: `Delete guest`,
+			test: func(t *testing.T) {
+				existed, err := c.Guest.Delete(ctx, *vmr)
+				require.NoError(t, err)
+				require.True(t, existed)
+			}},
+	}
+	for i, test := range tests {
+		t.Run(pad.Left(strconv.Itoa(i), 2, '0')+" "+test.name, test.test)
+	}
+}
+
+func Test_Qemu_Update_Min_To_Reduced(t *testing.T) {
+	t.Parallel()
+	const node = pveSDK.NodeName(test.FirstNode)
+	const guestName = "Test-Qemu-Update-Min-To-Reduced"
+	const guestID = 1023
+	ctx := context.Background()
+	cl, err := api_test.NewClient()
+	require.NoError(t, err)
+	require.NoError(t, cl.Login(ctx, test.UserID, test.Password, ""))
+	c := cl.New()
+	var vmr *pveSDK.VmRef
+	setMin, expectedMin := MinimumConfig(guestID, node, guestName)
+	setReduced, expectedReduced := ReducedConfig(guestID, node, guestName)
+	tests := []struct {
+		name string
+		test func(t *testing.T)
+	}{
+		{name: `Ensure guest does not exist`,
+			test: func(t *testing.T) {
+				existed, err := c.Guest.Delete(ctx, *pveSDK.NewVmRef(pveSDK.GuestID(guestID)))
+				require.NoError(t, err)
+				require.False(t, existed)
+			}},
+		{name: `Create guest`,
+			test: func(t *testing.T) {
+				vmr, err = c.QemuGuest.Create(ctx, setMin)
+				require.NoError(t, err)
+				require.NotNil(t, vmr)
+			}},
+		{name: `Check guest config`,
+			test: func(t *testing.T) {
+				CheckConfig(t, ctx, c.QemuGuest, guestID, expectedMin)
+			}},
+		{name: `Update guest`,
+			test: func(t *testing.T) {
+				err = c.QemuGuest.Update(ctx, *vmr, true, false, setReduced)
+				require.NoError(t, err)
+			}},
+		{name: `Check guest config after update`,
+			test: func(t *testing.T) {
+				CheckConfig(t, ctx, c.QemuGuest, guestID, expectedReduced)
+			}},
+		{name: `Delete guest`,
+			test: func(t *testing.T) {
+				existed, err := c.Guest.Delete(ctx, *vmr)
+				require.NoError(t, err)
+				require.True(t, existed)
+			}},
+	}
+	for i, test := range tests {
+		t.Run(pad.Left(strconv.Itoa(i), 2, '0')+" "+test.name, test.test)
+	}
+}
+
+func Test_Qemu_Update_Min_To_Max(t *testing.T) {
+	t.Parallel()
+	const node = pveSDK.NodeName(test.FirstNode)
+	const guestName = "Test-Qemu-Update-Min-To-Max"
+	const guestID = 1024
+	ctx := context.Background()
+	cl, err := api_test.NewClient()
+	require.NoError(t, err)
+	require.NoError(t, cl.Login(ctx, test.UserID, test.Password, ""))
+	c := cl.New()
+	var vmr *pveSDK.VmRef
+	setMin, expectedMin := MinimumConfig(guestID, node, guestName)
+	setMax, expectedMax := MaximumConfig(guestID, node, guestName)
+	ClearDiskID(expectedMax)
+	tests := []struct {
+		name string
+		test func(t *testing.T)
+	}{
+		{name: `Ensure guest does not exist`,
+			test: func(t *testing.T) {
+				existed, err := c.Guest.Delete(ctx, *pveSDK.NewVmRef(pveSDK.GuestID(guestID)))
+				require.NoError(t, err)
+				require.False(t, existed)
+			}},
+		{name: `Create guest`,
+			test: func(t *testing.T) {
+				vmr, err = c.QemuGuest.Create(ctx, setMin)
+				require.NoError(t, err)
+				require.NotNil(t, vmr)
+			}},
+		{name: `Check guest config`,
+			test: func(t *testing.T) {
+				CheckConfig(t, ctx, c.QemuGuest, guestID, expectedMin)
+			}},
+		{name: `Update guest`,
+			test: func(t *testing.T) {
+				err = c.QemuGuest.Update(ctx, *vmr, true, false, setMax)
+				require.NoError(t, err)
+			}},
+		{name: `Check guest config after update`,
+			test: func(t *testing.T) {
+				config := GetConfig(t, ctx, c.QemuGuest, guestID)
+				ClearDiskID(config)
+				require.EqualExportedValues(t, expectedMax, config)
+			}},
+		{name: `Delete guest`,
+			test: func(t *testing.T) {
+				existed, err := c.Guest.Delete(ctx, *vmr)
+				require.NoError(t, err)
+				require.True(t, existed)
+			}},
+	}
+	for i, test := range tests {
+		t.Run(pad.Left(strconv.Itoa(i), 2, '0')+" "+test.name, test.test)
+	}
+}
